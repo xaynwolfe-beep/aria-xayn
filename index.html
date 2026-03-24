@@ -209,7 +209,7 @@ function saveKey() {
   }
   apiKey = val;
   localStorage.setItem('aria_key', val);
-  document.getElementById('setup').style.display = 'none';
+  document.getElementById('setup').style.display = apiKey ? 'none' : 'flex';
 }
 
 function logout() {
