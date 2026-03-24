@@ -3,7 +3,7 @@ import { google } from 'googleapis';
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
- 'https://aria-xayn.vercel.app/api/auth/callback'
+https://aria-xayn.vercel.app/api/auth/callback
 ```
 
 Then also go to **Google Cloud Console → Google Auth Platform → Clients → click your Aria client → edit** and update the redirect URI:
