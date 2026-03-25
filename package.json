@@ -1,6 +1,6 @@
 {
   "name": "aria-agent",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "dependencies": {
     "googleapis": "^140.0.0"
