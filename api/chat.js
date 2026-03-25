@@ -40,13 +40,13 @@ export default async function handler(req, res) {
       const emailData = await emailList.json();
       if (emailData.messages) {
         const details = await Promise.all(emailData.messages.map(m =>
-          fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, { headers: authHeader }).then(r => r.json())
-        ));
-        context += 'UNREAD EMAILS:\n' + details.map(d => {
-          const h = d.payload?.headers || [];
-          const get = n => h.find(x => x.name === n)?.value || '';
-          return `- From: ${get('From')}, Subject: ${get('Subject')}`;
-        }).join('\n') + '\n\n';
+  fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, { headers: authHeader }).then(r => r.json())
+));
+context += 'REAL UNREAD EMAILS FROM USER GMAIL (do not make up emails, only use these):\n' + details.map(d => {
+  const h = d.payload?.headers || [];
+  const get = n => h.find(x => x.name === n)?.value || '';
+  return `- From: ${get('From')}, Subject: ${get('Subject')}, Date: ${get('Date')}`;
+}).join('\n') + '\n\n';
       }
     } catch(e) {}
 
