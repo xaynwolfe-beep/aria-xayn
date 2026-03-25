@@ -148,13 +148,21 @@ async function init() {
 }
 
 async function signInWithGoogle() {
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'getAuthUrl' })
-  });
-  const data = await res.json();
-  window.location.href = data.url;
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'getAuthUrl' })
+    });
+    const data = await res.json();
+    if (data.url) {
+      window.location.href = data.url;
+    } else {
+      alert('Error: ' + JSON.stringify(data));
+    }
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
 }
 
 function signOut() {
