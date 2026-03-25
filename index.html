@@ -123,30 +123,42 @@ let busy = false;
 let tokens = JSON.parse(localStorage.getItem('aria_tokens') || 'null');
 
 async function init() {
-  // Handle OAuth callback
   const params = new URLSearchParams(window.location.search);
   const code = params.get('code');
+  const error = params.get('error');
+
+  if (error) {
+    alert('Google login error: ' + error);
+    window.history.replaceState({}, document.title, '/');
+    return;
+  }
+
   if (code) {
+    window.history.replaceState({}, document.title, '/');
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'exchangeCode', code })
+        body: JSON.stringify({ action: 'exchangeCode', code: decodeURIComponent(code) })
       });
       const data = await res.json();
-      if (data.tokens) {
+      if (data.tokens && data.tokens.access_token) {
         tokens = data.tokens;
         localStorage.setItem('aria_tokens', JSON.stringify(tokens));
+        showChat();
+        return;
+      } else {
+        alert('Token error: ' + JSON.stringify(data));
       }
-    } catch(e) {}
-    window.history.replaceState({}, document.title, '/');
+    } catch(e) {
+      alert('Exchange error: ' + e.message);
+    }
   }
 
-  if (tokens) {
+  if (tokens && tokens.access_token) {
     showChat();
   }
 }
-
 async function signInWithGoogle() {
   try {
     const res = await fetch('/api/chat', {
