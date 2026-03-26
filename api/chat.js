@@ -126,7 +126,7 @@ export default async function handler(req, res) {
           details.forEach((d, i) => {
             const h = d.payload?.headers || [];
             const get = n => h.find(x => x.name === n)?.value || '';
-            context += `${i+1}. [${d._label}] From: ${get('From')} | To: ${get('To')} | Subject: ${get('Subject')} | Date: ${get('Date')} | Preview: ${(d.snippet||'').slice(0,100)}\n`;
+           context += `${i+1}. [${d._label}] From: ${get('From')} | To: ${get('To')} | Subject: ${get('Subject')} | Date: ${get('Date')}\n`;
           });
           context += '\n';
         } else {
@@ -164,7 +164,7 @@ export default async function handler(req, res) {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
         body: JSON.stringify({
           model: 'llama-3.3-70b-versatile',
-          max_tokens: 2048,
+          max_tokens: 1024,
           messages: [
             {
               role: 'system',
