@@ -13,17 +13,21 @@ export default async function handler(req, res) {
 
     // ── 1. Get Google OAuth URL ──────────────────────────────────────────────
     if (action === 'getAuthUrl') {
-      if (!CLIENT_ID) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID not set in Vercel env vars' });
+      if (!CLIENT_ID) return res.status(500).json({ error: 'GOOGLE_CLIENT_ID not set' });
 
       const params = new URLSearchParams({
         client_id: CLIENT_ID,
         redirect_uri: REDIRECT_URI,
         response_type: 'code',
         scope: [
-          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://mail.google.com/',
+          'https://www.googleapis.com/auth/gmail.modify',
+          'https://www.googleapis.com/auth/gmail.compose',
           'https://www.googleapis.com/auth/gmail.send',
-          'https://www.googleapis.com/auth/calendar.readonly',
-          'https://www.googleapis.com/auth/calendar.events'
+          'https://www.googleapis.com/auth/calendar',
+          'https://www.googleapis.com/auth/calendar.events',
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/userinfo.profile'
         ].join(' '),
         access_type: 'offline',
         prompt: 'consent'
@@ -37,9 +41,6 @@ export default async function handler(req, res) {
     // ── 2. Exchange auth code for tokens ─────────────────────────────────────
     if (action === 'exchangeCode') {
       if (!code) return res.status(400).json({ error: 'No code provided' });
-      if (!CLIENT_ID || !CLIENT_SECRET) {
-        return res.status(500).json({ error: 'Google credentials not set in Vercel env vars' });
-      }
 
       const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -54,108 +55,181 @@ export default async function handler(req, res) {
       });
 
       const tokenData = await tokenRes.json();
-
       if (tokenData.error) {
-        return res.status(400).json({
-          error: tokenData.error,
-          description: tokenData.error_description
-        });
+        return res.status(400).json({ error: tokenData.error, description: tokenData.error_description });
       }
 
-      return res.status(200).json({ tokens: tokenData });
+      // Fetch user profile
+      const profileRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+      });
+      const profile = await profileRes.json();
+
+      return res.status(200).json({ tokens: tokenData, profile });
     }
 
-    // ── 3. Chat with real Gmail + Calendar data ───────────────────────────────
+    // ── 3. Chat with full Gmail + Calendar access ─────────────────────────────
     if (action === 'chat') {
       if (!tokens?.access_token) {
         return res.status(401).json({ error: 'Not authenticated. Please sign in again.' });
       }
 
       const authHeader = { Authorization: `Bearer ${tokens.access_token}` };
+      const lastUserMessage = messages?.[messages.length - 1]?.content?.toLowerCase() || '';
       let context = '';
 
-      // Fetch unread emails
-      try {
-        const listRes = await fetch(
-          'https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds=UNREAD&maxResults=10',
-          { headers: authHeader }
-        );
-        const listData = await listRes.json();
+      const wantsUnread      = lastUserMessage.includes('unread') || lastUserMessage.includes('summarise') || lastUserMessage.includes('summarize');
+      const wantsSearch      = lastUserMessage.includes('find email') || lastUserMessage.includes('search email') || lastUserMessage.includes('email about') || lastUserMessage.includes('emails about');
+      const wantsCalendar    = lastUserMessage.includes('calendar') || lastUserMessage.includes('event') || lastUserMessage.includes('schedule') || lastUserMessage.includes('meeting') || lastUserMessage.includes('appointment') || lastUserMessage.includes('today') || lastUserMessage.includes('tomorrow') || lastUserMessage.includes('week');
 
-        if (listData.messages && listData.messages.length > 0) {
-          const details = await Promise.all(
-            listData.messages.slice(0, 10).map(m =>
-              fetch(
-                `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,
-                { headers: authHeader }
-              ).then(r => r.json())
-            )
+      // ── Fetch emails ────────────────────────────────────────────────────────
+      if (!wantsCalendar || wantsUnread || wantsSearch) {
+        try {
+          let emailUrl = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25';
+          if (wantsUnread) emailUrl += '&labelIds=UNREAD';
+          else if (wantsSearch) {
+            const match = lastUserMessage.match(/(?:about|find|search)\s+(.+?)(?:\s+email|$)/i);
+            if (match) emailUrl += `&q=${encodeURIComponent(match[1])}`;
+          } else {
+            emailUrl += '&labelIds=INBOX';
+          }
+
+          const listRes  = await fetch(emailUrl, { headers: authHeader });
+          const listData = await listRes.json();
+
+          if (listData.messages?.length > 0) {
+            const details = await Promise.all(
+              listData.messages.map(m =>
+                fetch(
+                  `https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=To`,
+                  { headers: authHeader }
+                ).then(r => r.json())
+              )
+            );
+
+            const label = wantsUnread ? 'UNREAD EMAILS' : wantsSearch ? 'MATCHING EMAILS' : 'INBOX EMAILS';
+            context += `${label} (${details.length} total):\n`;
+            context += details.map((d, i) => {
+              const h   = d.payload?.headers || [];
+              const get = n => h.find(x => x.name === n)?.value || '(unknown)';
+              return `${i + 1}. ID:${d.id} | From: ${get('From')} | Subject: ${get('Subject')} | Date: ${get('Date')} | Preview: ${(d.snippet || '').slice(0, 80)}`;
+            }).join('\n') + '\n\n';
+          } else {
+            context += `No emails found.\n\n`;
+          }
+        } catch (e) {
+          context += `Gmail error: ${e.message}\n\n`;
+        }
+      }
+
+      // ── Read full email body if user asks about a specific one ──────────────
+      const emailNumMatch = lastUserMessage.match(/(?:email\s*(?:number\s*)?#?|the\s+)(\d+)(?:st|nd|rd|th)?(?:\s+email)?/i);
+      if (emailNumMatch) {
+        const num = parseInt(emailNumMatch[1]) - 1;
+        try {
+          let emailUrl = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25';
+          if (lastUserMessage.includes('unread')) emailUrl += '&labelIds=UNREAD';
+          else emailUrl += '&labelIds=INBOX';
+
+          const listRes  = await fetch(emailUrl, { headers: authHeader });
+          const listData = await listRes.json();
+
+          if (listData.messages?.[num]) {
+            const fullEmail = await fetch(
+              `https://gmail.googleapis.com/gmail/v1/users/me/messages/${listData.messages[num].id}?format=full`,
+              { headers: authHeader }
+            ).then(r => r.json());
+
+            const extractBody = (payload) => {
+              if (!payload) return '';
+              if (payload.body?.data) return Buffer.from(payload.body.data, 'base64').toString('utf-8').slice(0, 3000);
+              if (payload.parts) {
+                for (const part of payload.parts) {
+                  if (part.mimeType === 'text/plain' && part.body?.data)
+                    return Buffer.from(part.body.data, 'base64').toString('utf-8').slice(0, 3000);
+                }
+                for (const part of payload.parts) {
+                  const b = extractBody(part); if (b) return b;
+                }
+              }
+              return '';
+            };
+
+            const h   = fullEmail.payload?.headers || [];
+            const get = n => h.find(x => x.name === n)?.value || '(unknown)';
+            const body = extractBody(fullEmail.payload);
+            context += `\nFULL EMAIL #${num + 1}:\nFrom: ${get('From')}\nTo: ${get('To')}\nSubject: ${get('Subject')}\nDate: ${get('Date')}\n\nBODY:\n${body || '(empty body)'}\n\n`;
+          }
+        } catch (e) {
+          context += `Could not read full email: ${e.message}\n\n`;
+        }
+      }
+
+      // ── Fetch calendar events ───────────────────────────────────────────────
+      if (wantsCalendar || (!wantsUnread && !wantsSearch)) {
+        try {
+          const now = new Date();
+          let timeMin = now.toISOString();
+          let timeMax = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+          if (lastUserMessage.includes('today')) {
+            const end = new Date(now); end.setHours(23, 59, 59); timeMax = end.toISOString();
+          } else if (lastUserMessage.includes('tomorrow')) {
+            const s = new Date(now); s.setDate(s.getDate() + 1); s.setHours(0, 0, 0);
+            const e = new Date(s);   e.setHours(23, 59, 59);
+            timeMin = s.toISOString(); timeMax = e.toISOString();
+          } else if (lastUserMessage.includes('this week')) {
+            const e = new Date(now); e.setDate(e.getDate() + 7); timeMax = e.toISOString();
+          }
+
+          const calRes  = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&maxResults=50&singleEvents=true&orderBy=startTime`,
+            { headers: authHeader }
           );
+          const calData = await calRes.json();
 
-          context += `UNREAD EMAILS (${details.length} total):\n`;
-          context += details.map(d => {
-            const h = d.payload?.headers || [];
-            const get = name => h.find(x => x.name === name)?.value || '(unknown)';
-            return `- From: ${get('From')}\n  Subject: ${get('Subject')}\n  Date: ${get('Date')}`;
-          }).join('\n') + '\n\n';
-        } else if (listData.error) {
-          context += `Gmail error: ${listData.error.message}\n\n`;
-        } else {
-          context += 'UNREAD EMAILS: None\n\n';
+          if (calData.items?.length > 0) {
+            context += `CALENDAR EVENTS (${calData.items.length} found):\n`;
+            context += calData.items.map((e, i) => {
+              const when = e.start?.dateTime || e.start?.date || 'unknown';
+              const end  = e.end?.dateTime   || e.end?.date   || '';
+              return `${i + 1}. ID:${e.id} | Title: ${e.summary || '(no title)'} | Start: ${when} | End: ${end} | Notes: ${e.description || 'none'}`;
+            }).join('\n') + '\n\n';
+          } else {
+            context += `CALENDAR: No events found in this period.\n\n`;
+          }
+        } catch (e) {
+          context += `Calendar error: ${e.message}\n\n`;
         }
-      } catch (e) {
-        context += `Gmail fetch failed: ${e.message}\n\n`;
       }
 
-      // Fetch calendar events
-      try {
-        const now = new Date().toISOString();
-        const calRes = await fetch(
-          `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${now}&maxResults=10&singleEvents=true&orderBy=startTime`,
-          { headers: authHeader }
-        );
-        const calData = await calRes.json();
-
-        if (calData.items && calData.items.length > 0) {
-          context += `UPCOMING CALENDAR EVENTS (${calData.items.length} total):\n`;
-          context += calData.items.map(e => {
-            const when = e.start?.dateTime || e.start?.date || 'unknown time';
-            return `- ${e.summary || '(no title)'} at ${when}`;
-          }).join('\n') + '\n\n';
-        } else if (calData.error) {
-          context += `Calendar error: ${calData.error.message}\n\n`;
-        } else {
-          context += 'UPCOMING CALENDAR EVENTS: None\n\n';
-        }
-      } catch (e) {
-        context += `Calendar fetch failed: ${e.message}\n\n`;
-      }
-
-      // Call Groq AI
+      // ── Call Groq ───────────────────────────────────────────────────────────
       const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.GROQ_API_KEY}`
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
         body: JSON.stringify({
           model: 'llama-3.3-70b-versatile',
-          max_tokens: 1024,
+          max_tokens: 2048,
           messages: [
             {
               role: 'system',
-              content: `You are Aria, a warm and intelligent personal assistant with LIVE access to the user's real Gmail inbox and Google Calendar.
+              content: `You are Aria, an intelligent personal assistant with FULL access to the user's Gmail and Google Calendar.
 
-IMPORTANT RULES:
-- ONLY use the real data provided below. NEVER invent, guess, or fabricate emails or events.
-- If the data shows errors, tell the user honestly.
-- Be concise, warm, and helpful.
-- Today's date and time: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' })} (Malaysia time)
+YOUR CAPABILITIES:
+- Read ALL emails (inbox, unread, search, full body)
+- Send emails and reply
+- Delete/trash emails  
+- Read all calendar events (past and future)
+- Create new calendar events
+- Delete/cancel events
 
-REAL LIVE DATA FROM USER'S ACCOUNT:
-${context}
+RULES:
+- ONLY reference data shown below. NEVER make up emails or events.
+- If asked to ACT (send, create, delete) — confirm what you'll do and say "Done!" or describe it clearly.
+- Be warm, smart, and concise. Today: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' })} Malaysia time.
 
-Use this data to answer questions. If asked to summarise emails, list ONLY the emails shown above.`
+LIVE DATA FROM USER'S ACCOUNT:
+${context || '(No data loaded for this query)'}`
             },
             ...(messages || [])
           ]
@@ -163,21 +237,71 @@ Use this data to answer questions. If asked to summarise emails, list ONLY the e
       });
 
       const groqData = await groqRes.json();
-      const reply = groqData.choices?.[0]?.message?.content;
-
-      if (!reply) {
-        return res.status(500).json({
-          error: 'AI response failed',
-          detail: JSON.stringify(groqData)
-        });
-      }
-
+      const reply    = groqData.choices?.[0]?.message?.content;
+      if (!reply) return res.status(500).json({ error: 'AI failed', detail: JSON.stringify(groqData) });
       return res.status(200).json({ reply });
+    }
+
+    // ── 4. Send Email ─────────────────────────────────────────────────────────
+    if (action === 'sendEmail') {
+      const { to, subject, body } = req.body;
+      const authHeader = { Authorization: `Bearer ${tokens.access_token}` };
+      const raw = Buffer.from(
+        [`To: ${to}`, `Subject: ${subject}`, 'Content-Type: text/plain; charset=utf-8', '', body].join('\n')
+      ).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+      const sendRes  = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+        method: 'POST',
+        headers: { ...authHeader, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw })
+      });
+      const sendData = await sendRes.json();
+      if (sendData.error) return res.status(400).json({ error: sendData.error.message });
+      return res.status(200).json({ success: true, messageId: sendData.id });
+    }
+
+    // ── 5. Create Calendar Event ──────────────────────────────────────────────
+    if (action === 'createEvent') {
+      const { title, startDateTime, endDateTime, description } = req.body;
+      const authHeader = { Authorization: `Bearer ${tokens.access_token}` };
+      const eventRes  = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        method: 'POST',
+        headers: { ...authHeader, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          summary: title,
+          description: description || '',
+          start: { dateTime: startDateTime, timeZone: 'Asia/Kuala_Lumpur' },
+          end:   { dateTime: endDateTime,   timeZone: 'Asia/Kuala_Lumpur' }
+        })
+      });
+      const eventData = await eventRes.json();
+      if (eventData.error) return res.status(400).json({ error: eventData.error.message });
+      return res.status(200).json({ success: true, event: eventData });
+    }
+
+    // ── 6. Trash Email ────────────────────────────────────────────────────────
+    if (action === 'deleteEmail') {
+      const { messageId } = req.body;
+      const delRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/trash`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tokens.access_token}` }
+      });
+      return res.status(200).json({ success: delRes.ok });
+    }
+
+    // ── 7. Delete Calendar Event ──────────────────────────────────────────────
+    if (action === 'deleteEvent') {
+      const { eventId } = req.body;
+      const delRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${tokens.access_token}` }
+      });
+      return res.status(200).json({ success: delRes.ok });
     }
 
     return res.status(400).json({ error: `Unknown action: ${action}` });
 
   } catch (err) {
-    return res.status(500).json({ error: err.message, stack: err.stack });
+    return res.status(500).json({ error: err.message });
   }
 }
