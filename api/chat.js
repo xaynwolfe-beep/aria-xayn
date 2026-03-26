@@ -82,17 +82,54 @@ export default async function handler(req, res) {
       const wantsSearch      = lastUserMessage.includes('find email') || lastUserMessage.includes('search email') || lastUserMessage.includes('email about') || lastUserMessage.includes('emails about');
       const wantsCalendar    = lastUserMessage.includes('calendar') || lastUserMessage.includes('event') || lastUserMessage.includes('schedule') || lastUserMessage.includes('meeting') || lastUserMessage.includes('appointment') || lastUserMessage.includes('today') || lastUserMessage.includes('tomorrow') || lastUserMessage.includes('week');
 
-      // ── Fetch emails ────────────────────────────────────────────────────────
+    // ── Fetch emails ────────────────────────────────────────────────────────
       if (!wantsCalendar || wantsUnread || wantsSearch) {
         try {
-          let emailUrl = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=100';
-          if (wantsUnread) emailUrl += '&labelIds=UNREAD';
-          else if (wantsSearch) {
-            const match = lastUserMessage.match(/(?:about|find|search)\s+(.+?)(?:\s+email|$)/i);
-            if (match) emailUrl += `&q=${encodeURIComponent(match[1])}`;
+          // Always fetch ALL folders in parallel
+          const [inboxRes, sentRes, unreadRes, starredRes] = await Promise.all([
+            fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&labelIds=INBOX', { headers: authHeader }),
+            fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&labelIds=SENT', { headers: authHeader }),
+            fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&labelIds=UNREAD', { headers: authHeader }),
+            fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&labelIds=STARRED', { headers: authHeader })
+          ]);
+          const [inboxData, sentData, unreadData, starredData] = await Promise.all([
+            inboxRes.json(), sentRes.json(), unreadRes.json(), starredRes.json()
+          ]);
+
+          const allIds = new Map();
+          const tag = (msgs, label) => (msgs || []).forEach(m => {
+            if (!allIds.has(m.id)) allIds.set(m.id, label);
+          });
+          tag(inboxData.messages, 'INBOX');
+          tag(sentData.messages, 'SENT');
+          tag(unreadData.messages, 'UNREAD');
+          tag(starredData.messages, 'STARRED');
+
+          const details = await Promise.all(
+            [...allIds.entries()].map(([id, label]) =>
+              fetch(
+                `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=To`,
+                { headers: authHeader }
+              ).then(r => r.json()).then(d => ({ ...d, _label: label }))
+            )
+          );
+
+          const emailUrl = ''; // not used anymore
+          if (details.length > 0) {
+            context += `ALL EMAILS (${details.length} total from inbox, sent, unread, starred):\n`;
+            context += details.map((d, i) => {
+              const h = d.payload?.headers || [];
+              const get = n => h.find(x => x.name === n)?.value || '(unknown)';
+              return `${i+1}. [${d._label}] ID:${d.id} | From: ${get('From')} | To: ${get('To')} | Subject: ${get('Subject')} | Date: ${get('Date')} | Preview: ${(d.snippet||'').slice(0,80)}`;
+            }).join('\n') + '\n\n';
           } else {
-            emailUrl += '&labelIds=INBOX';
+            context += 'No emails found.\n\n';
           }
+
+          // dummy to satisfy existing if-block structure
+          const listData = { messages: [] };
+          if (false) {
+            let emailUrl2 = '';
 
           const listRes  = await fetch(emailUrl, { headers: authHeader });
           const listData = await listRes.json();
@@ -114,9 +151,7 @@ export default async function handler(req, res) {
               const get = n => h.find(x => x.name === n)?.value || '(unknown)';
               return `${i + 1}. ID:${d.id} | From: ${get('From')} | Subject: ${get('Subject')} | Date: ${get('Date')} | Preview: ${(d.snippet || '').slice(0, 80)}`;
             }).join('\n') + '\n\n';
-          } else {
-            context += `No emails found.\n\n`;
-          }
+         }
         } catch (e) {
           context += `Gmail error: ${e.message}\n\n`;
         }
