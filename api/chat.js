@@ -85,7 +85,7 @@ export default async function handler(req, res) {
       // ── Fetch emails ────────────────────────────────────────────────────────
       if (!wantsCalendar || wantsUnread || wantsSearch) {
         try {
-          let emailUrl = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25';
+          let emailUrl = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=100';
           if (wantsUnread) emailUrl += '&labelIds=UNREAD';
           else if (wantsSearch) {
             const match = lastUserMessage.match(/(?:about|find|search)\s+(.+?)(?:\s+email|$)/i);
