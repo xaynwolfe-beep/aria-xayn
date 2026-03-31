@@ -16,16 +16,7 @@ export default async function handler(req, res) {
         client_id: CLIENT_ID,
         redirect_uri: REDIRECT_URI,
         response_type: 'code',
-        scope: [
-          'https://mail.google.com/',
-          'https://www.googleapis.com/auth/gmail.modify',
-          'https://www.googleapis.com/auth/gmail.compose',
-          'https://www.googleapis.com/auth/gmail.send',
-          'https://www.googleapis.com/auth/calendar',
-          'https://www.googleapis.com/auth/calendar.events',
-          'https://www.googleapis.com/auth/userinfo.email',
-          'https://www.googleapis.com/auth/userinfo.profile'
-        ].join(' '),
+        scope: ['https://mail.google.com/','https://www.googleapis.com/auth/gmail.modify','https://www.googleapis.com/auth/gmail.compose','https://www.googleapis.com/auth/gmail.send','https://www.googleapis.com/auth/calendar','https://www.googleapis.com/auth/calendar.events','https://www.googleapis.com/auth/userinfo.email','https://www.googleapis.com/auth/userinfo.profile'].join(' '),
         access_type: 'offline',
         prompt: 'consent'
       });
@@ -93,23 +84,18 @@ export default async function handler(req, res) {
       const lastMsg = messages?.[messages.length - 1]?.content?.toLowerCase() || '';
       let context = '';
 
-      // Fetch ALL email folders in parallel
+      // Smart email fetching - only fetch what's needed
       try {
-       const wantsSent = lastMsg.includes('sent');
-const wantsUnread = lastMsg.includes('unread');
-const wantsStarred = lastMsg.includes('starred');
-
-const fetchLabel = (label) => fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&labelIds=${label}`, { headers: authHeader }).then(r => r.json());
-
-const [inboxData, sentData, unreadData, starredData] = await Promise.all([
-  (!wantsSent && !wantsUnread && !wantsStarred) ? fetchLabel('INBOX') : Promise.resolve({}),
-  wantsSent ? fetchLabel('SENT') : Promise.resolve({}),
-  wantsUnread ? fetchLabel('UNREAD') : Promise.resolve({}),
-  wantsStarred ? fetchLabel('STARRED') : Promise.resolve({})
-]);
+        const wantsSent = lastMsg.includes('sent');
+        const wantsUnread = lastMsg.includes('unread');
+        const wantsStarred = lastMsg.includes('starred');
+        const fetchLabel = (label) => fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&labelIds=${label}`, { headers: authHeader }).then(r => r.json());
 
         const [inboxData, sentData, unreadData, starredData] = await Promise.all([
-          inboxRes.json(), sentRes.json(), unreadRes.json(), starredRes.json()
+          (!wantsSent && !wantsUnread && !wantsStarred) ? fetchLabel('INBOX') : Promise.resolve({}),
+          wantsSent ? fetchLabel('SENT') : Promise.resolve({}),
+          wantsUnread ? fetchLabel('UNREAD') : Promise.resolve({}),
+          wantsStarred ? fetchLabel('STARRED') : Promise.resolve({})
         ]);
 
         const allEmails = new Map();
@@ -128,11 +114,11 @@ const [inboxData, sentData, unreadData, starredData] = await Promise.all([
                 .then(r => r.json()).then(d => ({ ...d, _label: label }))
             )
           );
-          context += `ALL EMAILS (${details.length} total - inbox, sent, unread, starred):\n`;
+          context += `EMAILS (${details.length} total):\n`;
           details.forEach((d, i) => {
             const h = d.payload?.headers || [];
             const get = n => h.find(x => x.name === n)?.value || '';
-           context += `${i+1}. [${d._label}] From: ${get('From')} | To: ${get('To')} | Subject: ${get('Subject')} | Date: ${get('Date')}\n`;
+            context += `${i+1}. [${d._label}] From: ${get('From')} | To: ${get('To')} | Subject: ${get('Subject')} | Date: ${get('Date')}\n`;
           });
           context += '\n';
         } else {
@@ -150,7 +136,7 @@ const [inboxData, sentData, unreadData, starredData] = await Promise.all([
         if (lastMsg.includes('today')) { const end = new Date(now); end.setHours(23,59,59); timeMax = end.toISOString(); }
         else if (lastMsg.includes('tomorrow')) { const s = new Date(now); s.setDate(s.getDate()+1); s.setHours(0,0,0); const e = new Date(s); e.setHours(23,59,59); timeMin = s.toISOString(); timeMax = e.toISOString(); }
 
-        const calRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&maxResults=50&singleEvents=true&orderBy=startTime`, { headers: authHeader });
+        const calRes = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&maxResults=20&singleEvents=true&orderBy=startTime`, { headers: authHeader });
         const calData = await calRes.json();
 
         if (calData.items?.length > 0) {
@@ -165,26 +151,35 @@ const [inboxData, sentData, unreadData, starredData] = await Promise.all([
         context += `Calendar error: ${e.message}\n`;
       }
 
-  const systemPrompt = `You are Aria, a smart personal assistant with FULL access to the user's Gmail and Google Calendar.\n\nRULES:\n- ONLY use the real data below. NEVER invent emails or events.\n- You can see inbox, sent, unread, and starred emails.\n- Be warm, concise, helpful.\n- Today: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' })} Malaysia time.\n\nLIVE DATA:\n${context}`;
+      // Call Gemini
+      const systemPrompt = `You are Aria, a smart personal assistant with FULL access to the user's Gmail and Google Calendar.\n\nRULES:\n- ONLY use the real data below. NEVER invent emails or events.\n- Be warm, concise, helpful.\n- Today: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' })} Malaysia time.\n\nLIVE DATA:\n${context}`;
 
-const geminiMessages = messages.map(m => ({
-  role: m.role === 'assistant' ? 'model' : 'user',
-  parts: [{ text: m.content }]
-}));
+      const geminiMessages = (messages || []).map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }]
+      }));
 
-const geminiRes = await fetch(
-`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-  {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents: geminiMessages
-    })
+      const geminiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: geminiMessages
+          })
+        }
+      );
+
+      const geminiData = await geminiRes.json();
+      const reply = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!reply) return res.status(500).json({ error: 'AI error: ' + JSON.stringify(geminiData) });
+      return res.status(200).json({ reply });
+    }
+
+    return res.status(400).json({ error: 'Unknown action: ' + action });
+
+  } catch(err) {
+    return res.status(500).json({ error: err.message });
   }
-);
-
-const geminiData = await geminiRes.json();
-const reply = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
-if (!reply) return res.status(500).json({ error: 'AI error: ' + JSON.stringify(geminiData) });
-return res.status(200).json({ reply });
+}
