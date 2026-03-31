@@ -165,31 +165,26 @@ const [inboxData, sentData, unreadData, starredData] = await Promise.all([
         context += `Calendar error: ${e.message}\n`;
       }
 
-      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-        body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
-          max_tokens: 1024,
-          messages: [
-            {
-              role: 'system',
-              content: `You are Aria, a smart personal assistant with FULL access to the user's Gmail and Google Calendar.\n\nRULES:\n- ONLY use the real data below. NEVER invent emails or events.\n- You can see inbox, sent, unread, and starred emails.\n- Be warm, concise, helpful.\n- Today: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' })} Malaysia time.\n\nLIVE DATA:\n${context}`
-            },
-            ...(messages || [])
-          ]
-        })
-      });
+  const systemPrompt = `You are Aria, a smart personal assistant with FULL access to the user's Gmail and Google Calendar.\n\nRULES:\n- ONLY use the real data below. NEVER invent emails or events.\n- You can see inbox, sent, unread, and starred emails.\n- Be warm, concise, helpful.\n- Today: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' })} Malaysia time.\n\nLIVE DATA:\n${context}`;
 
-      const groqData = await groqRes.json();
-      const reply = groqData.choices?.[0]?.message?.content;
-      if (!reply) return res.status(500).json({ error: 'AI error: ' + JSON.stringify(groqData) });
-      return res.status(200).json({ reply });
-    }
+const geminiMessages = messages.map(m => ({
+  role: m.role === 'assistant' ? 'model' : 'user',
+  parts: [{ text: m.content }]
+}));
 
-    return res.status(400).json({ error: 'Unknown action: ' + action });
-
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
+const geminiRes = await fetch(
+  `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite-preview-06-17:generateContent?key=${process.env.GEMINI_API_KEY}`,
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents: geminiMessages
+    })
   }
-}
+);
+
+const geminiData = await geminiRes.json();
+const reply = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+if (!reply) return res.status(500).json({ error: 'AI error: ' + JSON.stringify(geminiData) });
+return res.status(200).json({ reply });
