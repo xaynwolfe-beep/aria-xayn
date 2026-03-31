@@ -95,12 +95,18 @@ export default async function handler(req, res) {
 
       // Fetch ALL email folders in parallel
       try {
-        const [inboxRes, sentRes, unreadRes, starredRes] = await Promise.all([
-          fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&labelIds=INBOX', { headers: authHeader }),
-          fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&labelIds=SENT', { headers: authHeader }),
-          fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&labelIds=UNREAD', { headers: authHeader }),
-          fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&labelIds=STARRED', { headers: authHeader })
-        ]);
+       const wantsSent = lastMsg.includes('sent');
+const wantsUnread = lastMsg.includes('unread');
+const wantsStarred = lastMsg.includes('starred');
+
+const fetchLabel = (label) => fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&labelIds=${label}`, { headers: authHeader }).then(r => r.json());
+
+const [inboxData, sentData, unreadData, starredData] = await Promise.all([
+  (!wantsSent && !wantsUnread && !wantsStarred) ? fetchLabel('INBOX') : Promise.resolve({}),
+  wantsSent ? fetchLabel('SENT') : Promise.resolve({}),
+  wantsUnread ? fetchLabel('UNREAD') : Promise.resolve({}),
+  wantsStarred ? fetchLabel('STARRED') : Promise.resolve({})
+]);
 
         const [inboxData, sentData, unreadData, starredData] = await Promise.all([
           inboxRes.json(), sentRes.json(), unreadRes.json(), starredRes.json()
